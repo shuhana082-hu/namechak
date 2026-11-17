@@ -7,15 +7,13 @@ services:
     startCommand: npm start
     healthCheckPath: /health
     envVars:
-      - key: UPSTREAM_URL
-        sync: false
-      - key: UPSTREAM_KEY
+      - key: FF_API_KEY
         sync: false
       - key: API_KEYS
         sync: false
       - key: DEFAULT_REGION
         value: BD
       - key: CACHE_TTL_SECONDS
-        value: "300"
+        value: "1800"
       - key: RATE_LIMIT_PER_MIN
         value: "60"
