@@ -86,27 +86,31 @@ function ts(v) {
   return n > 1e9 && n < 1e11 ? new Date(n * 1000).toISOString() : (v ?? null);
 }
 function normalize(raw, uid, region) {
-  // ফরম্যাট ১: LK-TEAM style (basicinfo, clanbasicinfo, socialinfo)
-  if (raw && raw.basicinfo) {
-    const b = raw.basicinfo, c = raw.clanbasicinfo || {}, so = raw.socialinfo || {};
-    if (!b.nickname) { const e = new Error("Player not found."); e.status = 404; throw e; }
+  // ফরম্যাট ১: basicinfo / basicInfo (lowercase বা camelCase দুটোই চলবে)
+  const bi = raw && (raw.basicinfo || raw.basicInfo);
+  if (bi) {
+    const c = raw.clanbasicinfo || raw.clanBasicInfo || {};
+    const so = raw.socialinfo || raw.socialInfo || {};
+    const b = bi;
+    const name = pick(b, "nickname");
+    if (!name) { const e = new Error("Player not found."); e.status = 404; throw e; }
     return {
       success: true,
-      uid: String(b.accountid || uid),
-      name: b.nickname,
-      level: b.level ?? null,
-      likes: b.liked ?? null,
-      region: b.region || region,
-      signature: so.signature ?? null,
-      last_login: ts(b.lastloginat),
-      created_at: ts(b.createat),
-      battle_royale: { max_rank: b.maxrank ?? null, points: b.rankingpoints ?? null },
-      clash_squad: { max_rank: b.csmaxrank ?? null, points: b.csrankingpoints ?? null },
+      uid: String(pick(b, "accountid", "accountId") || uid),
+      name,
+      level: pick(b, "level"),
+      likes: pick(b, "liked"),
+      region: pick(b, "region") || region,
+      signature: pick(so, "signature"),
+      last_login: ts(pick(b, "lastloginat", "lastLoginAt")),
+      created_at: ts(pick(b, "createat", "createAt")),
+      battle_royale: { max_rank: pick(b, "maxrank", "maxRank"), points: pick(b, "rankingpoints", "rankingPoints") },
+      clash_squad: { max_rank: pick(b, "csmaxrank", "csMaxRank"), points: pick(b, "csrankingpoints", "csRankingPoints") },
       guild: {
-        id: c.clanid ?? null, name: c.clanname ?? null, level: c.clanlevel ?? null,
-        member_count: c.membernum ?? null, capacity: c.capacity ?? null,
+        id: pick(c, "clanid", "clanId"), name: pick(c, "clanname", "clanName"), level: pick(c, "clanlevel", "clanLevel"),
+        member_count: pick(c, "membernum", "memberNum"), capacity: pick(c, "capacity"),
       },
-      release_version: b.releaseversion ?? null,
+      release_version: pick(b, "releaseversion", "releaseVersion"),
       fetched_at: new Date().toISOString(),
     };
   }
