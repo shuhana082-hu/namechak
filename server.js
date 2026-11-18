@@ -142,16 +142,48 @@ function normalize(raw, uid, region) {
 }
 
 // ---- Routes ----
-app.get("/", (req, res) => {
-  res.type("html").send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Name Check API</title>
-<body style="font-family:system-ui;background:#0a0e17;color:#e6edf3;max-width:640px;margin:10vh auto;padding:0 16px">
-<h1>✅ API Running</h1>
-<p>Free Fire name check API is live.</p>
-<pre style="background:#111826;padding:12px;border-radius:8px;overflow:auto">GET /api/player?uid=PLAYER_UID&amp;region=BD
-GET /api/name?uid=PLAYER_UID
-GET /health</pre></body>`);
-});
+const HOME_HTML = [
+'<!doctype html><html lang="bn"><head><meta charset="utf-8">',
+'<meta name="viewport" content="width=device-width,initial-scale=1">',
+'<title>FF Name Check</title>',
+'<style>',
+':root{--bg:#0a0e17;--card:#111826;--line:#1f2a3d;--text:#e6edf3;--mut:#8b97a8;--acc:#ff6a3d}',
+'*{box-sizing:border-box}',
+'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding:16px}',
+'.card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px}',
+'h1{margin:0 0 4px;font-size:22px}',
+'p.sub{margin:0 0 20px;color:var(--mut);font-size:14px}',
+'form{display:flex;flex-direction:column;gap:10px}',
+'input{width:100%;padding:14px;font-size:16px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);outline:none}',
+'input:focus{border-color:var(--acc)}',
+'button{padding:14px;font-size:16px;font-weight:600;border:0;border-radius:10px;background:var(--acc);color:#fff;cursor:pointer}',
+'button:disabled{opacity:.6;cursor:wait}',
+'#out{margin-top:18px;min-height:24px;padding:14px;border-radius:10px;background:var(--bg);border:1px dashed var(--line);font-size:18px;text-align:center;word-break:break-word;display:none}',
+'#out.err{color:#ff7b72;font-size:15px}',
+'#out small{display:block;color:var(--mut);font-size:12px;margin-bottom:4px}',
+'</style></head><body><main class="card">',
+'<h1>Free Fire Name Check</h1>',
+'<p class="sub">প্লেয়ারের UID দিন, নাম দেখুন।</p>',
+'<form id="f"><input id="uid" inputmode="numeric" autocomplete="off" placeholder="UID লিখুন" maxlength="15" required>',
+'<button id="btn" type="submit">Check</button></form>',
+'<div id="out" role="status" aria-live="polite"></div>',
+'</main><script>',
+'var f=document.getElementById("f"),u=document.getElementById("uid"),b=document.getElementById("btn"),o=document.getElementById("out");',
+'function show(t,e,label){o.style.display="block";o.className=e?"err":"";o.textContent="";',
+'if(label){var s=document.createElement("small");s.textContent=label;o.appendChild(s);}',
+'o.appendChild(document.createTextNode(t));}',
+'f.addEventListener("submit",function(ev){ev.preventDefault();',
+'var v=u.value.replace(/\\D/g,"");',
+'if(v.length<5){show("সঠিক UID দিন (শুধু সংখ্যা)",true);return;}',
+'b.disabled=true;b.textContent="Checking...";',
+'fetch("/api/check?uid="+encodeURIComponent(v)).then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j};});})',
+'.then(function(x){if(x.ok&&x.j.name){show(x.j.name,false,"Player Name");}else{show(x.j.error||"কিছু ভুল হয়েছে",true);}})',
+'.catch(function(){show("সার্ভারে সংযোগ হয়নি, আবার চেষ্টা করুন",true);})',
+'.then(function(){b.disabled=false;b.textContent="Check";});});',
+'</script></body></html>'
+].join("\n");
+
+app.get("/", (req, res) => res.type("html").send(HOME_HTML));
 
 app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
 
@@ -172,6 +204,22 @@ async function handle(req, res, onlyName) {
     res.status(err.status || 500).json({ success: false, error: err.message || "Internal error" });
   }
 }
+
+// শুধু নাম দেয়, API key লাগে না (ওয়েব পেজের জন্য)। রেট লিমিট আছে।
+app.get("/api/check", async (req, res) => {
+  const uid = String(req.query.uid || "").trim();
+  const region = String(req.query.region || DEFAULT_REGION).trim().toUpperCase();
+  if (!/^\d{5,15}$/.test(uid)) return res.status(400).json({ success: false, error: "সঠিক UID দিন (শুধু সংখ্যা)" });
+  try {
+    const key = region + ":" + uid;
+    let data = cacheGet(key);
+    if (!data) { data = await fetchPlayer(uid, region); cacheSet(key, data); }
+    res.json({ success: true, name: data.name });
+  } catch (err) {
+    const msg = err.status === 404 ? "প্লেয়ার পাওয়া যায়নি" : err.status === 503 ? "সার্ভার এখনো সেট করা হয়নি" : "সোর্স সার্ভার থেকে তথ্য আনা যায়নি, একটু পরে চেষ্টা করুন";
+    res.status(err.status || 500).json({ success: false, error: msg });
+  }
+});
 
 app.get("/api/player", auth, (req, res) => handle(req, res, false));
 app.get("/api/name", auth, (req, res) => handle(req, res, true));
