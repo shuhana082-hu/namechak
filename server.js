@@ -6,23 +6,21 @@ const rateLimit = require("express-rate-limit");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---- Config (Render > Environment) ----
-// FF_API_KEY: developers.freefirecommunity.com থেকে নেওয়া তোমার API key (বাধ্যতামূলক)
-const FF_API_BASE = (process.env.FF_API_BASE || "https://developers.freefirecommunity.com/api/v1").replace(/\/+$/, "");
-const FF_API_KEY = process.env.FF_API_KEY || "";
-// তোমার নিজের ক্লায়েন্টদের জন্য key (খালি = ওপেন)
-const API_KEYS = (process.env.API_KEYS || "").split(",").map(s => s.trim()).filter(Boolean);
-const DEFAULT_REGION = (process.env.DEFAULT_REGION || "BD").toUpperCase();
-const CACHE_TTL_MS = (Number(process.env.CACHE_TTL_SECONDS) || 1800) * 1000;
+// ---- Config (set these in Render > Environment) ----
+// UPSTREAM_URL: তোমার ডেটা সোর্স। {uid} ও {region} প্লেসহোল্ডার ব্যবহার করা যাবে।
+// উদাহরণ: https://your-data-source.example/api/info?uid={uid}&region={region}
+const UPSTREAM_URL = process.env.UPSTREAM_URL || "";
+const UPSTREAM_KEY = process.env.UPSTREAM_KEY || ""; // থাকলে Authorization: Bearer ... যাবে
+const UPSTREAM_KEY_HEADER = process.env.UPSTREAM_KEY_HEADER || "Authorization"; // যেমন x-api-key
+const API_KEYS = (process.env.API_KEYS || "").split(",").map(s => s.trim()).filter(Boolean); // খালি = ওপেন
+const DEFAULT_REGION = process.env.DEFAULT_REGION || "BD";
+const CACHE_TTL_MS = (Number(process.env.CACHE_TTL_SECONDS) || 300) * 1000;
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN) || 60;
-
-// Upstream শুধু sg / ind / br বোঝে। BD → sg (Southeast Asia server)।
-const REGION_MAP = { BD: "sg", SG: "sg", IND: "ind", IN: "ind", BR: "br" };
-const UPSTREAM_REGIONS = ["sg", "ind", "br"];
 
 app.set("trust proxy", 1);
 app.use(cors());
 
+// ---- Rate limit ----
 app.use("/api/", rateLimit({
   windowMs: 60 * 1000,
   limit: RATE_LIMIT_PER_MIN,
@@ -31,7 +29,7 @@ app.use("/api/", rateLimit({
   message: { success: false, error: "Too many requests, slow down." },
 }));
 
-// ---- In-memory cache ----
+// ---- Simple in-memory cache ----
 const cache = new Map();
 function cacheGet(key) {
   const hit = cache.get(key);
@@ -44,7 +42,7 @@ function cacheSet(key, val) {
   cache.set(key, { val, exp: Date.now() + CACHE_TTL_MS });
 }
 
-// ---- Optional client auth ----
+// ---- Optional API key check ----
 function auth(req, res, next) {
   if (API_KEYS.length === 0) return next();
   const key = req.get("x-api-key") || req.query.key;
@@ -52,73 +50,89 @@ function auth(req, res, next) {
   return res.status(401).json({ success: false, error: "Invalid or missing API key." });
 }
 
-function httpError(status, message) {
-  const e = new Error(message);
-  e.status = status;
-  return e;
-}
-
-// ---- Upstream call (Free Fire Community API) ----
-async function callUpstream(endpoint, params) {
-  if (!FF_API_KEY) throw httpError(503, "FF_API_KEY is not configured on the server.");
-  const qs = new URLSearchParams(params).toString();
+// ---- Provider: upstream থেকে ডেটা আনে ও স্ট্যান্ডার্ড ফরম্যাটে সাজায় ----
+async function fetchPlayer(uid, region) {
+  if (!UPSTREAM_URL) {
+    const e = new Error("UPSTREAM_URL is not configured on the server.");
+    e.status = 503;
+    throw e;
+  }
+  const url = UPSTREAM_URL.replace("{uid}", encodeURIComponent(uid)).replace("{region}", encodeURIComponent(region));
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15000);
   try {
-    const r = await fetch(`${FF_API_BASE}/${endpoint}?${qs}`, {
+    const r = await fetch(url, {
       signal: ctrl.signal,
-      headers: { "x-api-key": FF_API_KEY, Accept: "application/json" },
+      headers: UPSTREAM_KEY ? { [UPSTREAM_KEY_HEADER]: UPSTREAM_KEY_HEADER.toLowerCase() === "authorization" ? `Bearer ${UPSTREAM_KEY}` : UPSTREAM_KEY } : {},
     });
-    if (r.status === 404) throw httpError(404, "Player not found.");
-    if (r.status === 429) throw httpError(429, "Upstream rate limit reached. Try again later.");
-    if (r.status === 401) throw httpError(502, "Upstream rejected the server's FF_API_KEY.");
-    if (r.status === 400) throw httpError(400, "Upstream rejected the request parameters.");
-    if (!r.ok) throw httpError(502, `Upstream error (${r.status}).`);
-    const json = await r.json();
-    if (json && json.status === "error") throw httpError(404, json.message || "Player not found.");
-    return json && json.data ? json.data : json;
+    if (r.status === 404) { const e = new Error("Player not found."); e.status = 404; throw e; }
+    if (!r.ok) { const e = new Error(`Upstream error (${r.status}).`); e.status = 502; throw e; }
+    return normalize(await r.json(), uid, region);
   } catch (err) {
-    if (err.name === "AbortError") throw httpError(504, "Upstream timeout.");
+    if (err.name === "AbortError") { const e = new Error("Upstream timeout."); e.status = 504; throw e; }
     throw err;
   } finally {
     clearTimeout(timer);
   }
 }
 
-// Region মিলতে হয়, তাই প্রথমে mapped region, না পেলে বাকি দুটো চেষ্টা করা হয়।
-async function callWithRegion(endpoint, uid, region) {
-  const first = REGION_MAP[region] || region.toLowerCase();
-  const order = [first, ...UPSTREAM_REGIONS.filter(r => r !== first)];
-  let lastErr;
-  for (const r of order) {
-    try {
-      const data = await callUpstream(endpoint, { region: r, uid });
-      return { data, usedRegion: r };
-    } catch (err) {
-      lastErr = err;
-      if (err.status !== 404) throw err; // শুধু not-found হলে পরের region
-    }
-  }
-  throw lastErr || httpError(404, "Player not found.");
+// বিভিন্ন সোর্সের ফিল্ড নাম আলাদা হতে পারে, তাই কয়েকটা সম্ভাব্য নাম চেক করা হয়।
+function pick(o, ...keys) {
+  for (const k of keys) if (o && o[k] !== undefined && o[k] !== null) return o[k];
+  return null;
 }
-
-function normalizePlayer(d, uid, usedRegion) {
-  const name = d.name || d.nickname;
-  if (!name) throw httpError(404, "Player not found.");
+function ts(v) {
+  const n = Number(v);
+  return n > 1e9 && n < 1e11 ? new Date(n * 1000).toISOString() : (v ?? null);
+}
+function normalize(raw, uid, region) {
+  // ফরম্যাট ১: LK-TEAM style (basicinfo, clanbasicinfo, socialinfo)
+  if (raw && raw.basicinfo) {
+    const b = raw.basicinfo, c = raw.clanbasicinfo || {}, so = raw.socialinfo || {};
+    if (!b.nickname) { const e = new Error("Player not found."); e.status = 404; throw e; }
+    return {
+      success: true,
+      uid: String(b.accountid || uid),
+      name: b.nickname,
+      level: b.level ?? null,
+      likes: b.liked ?? null,
+      region: b.region || region,
+      signature: so.signature ?? null,
+      last_login: ts(b.lastloginat),
+      created_at: ts(b.createat),
+      battle_royale: { max_rank: b.maxrank ?? null, points: b.rankingpoints ?? null },
+      clash_squad: { max_rank: b.csmaxrank ?? null, points: b.csrankingpoints ?? null },
+      guild: {
+        id: c.clanid ?? null, name: c.clanname ?? null, level: c.clanlevel ?? null,
+        member_count: c.membernum ?? null, capacity: c.capacity ?? null,
+      },
+      release_version: b.releaseversion ?? null,
+      fetched_at: new Date().toISOString(),
+    };
+  }
+  // ফরম্যাট ২: AccountInfo / flat / player ধরনের সোর্স
+  const d = raw.player || raw.data || raw.AccountInfo || raw;
+  const acc = raw.AccountInfo || d;
+  const guild = raw.GuildInfo || d.guild || {};
+  const name = pick(acc, "name", "nickname", "AccountName");
+  if (!name) { const e = new Error("Player not found."); e.status = 404; throw e; }
   return {
     success: true,
-    uid: String(d.uid || uid),
+    uid: String(uid),
     name,
-    level: d.level ?? null,
-    likes: d.likes ?? null,
-    region: d.region || usedRegion,
-    rank: d.rank ?? null,
-    tier: d.tier ?? null,
-    signature: d.signature ?? null,
-    guild: { id: d.guildId ?? null, name: typeof d.guild === "string" ? d.guild : (d.guild && d.guild.name) || null },
-    badges: Array.isArray(d.badges) ? d.badges : [],
-    equipped_pet: d.equippedPet ?? null,
-    equipped_character: d.equippedCharacter ?? null,
+    level: pick(acc, "level", "AccountLevel"),
+    likes: pick(acc, "likes", "liked", "AccountLikes"),
+    region: pick(acc, "region", "AccountRegion") || region,
+    signature: pick(d, "signature") || pick(raw.SocialInfo || {}, "signature"),
+    last_login: pick(acc, "last_login", "AccountLastLogin"),
+    created_at: pick(acc, "created_at", "AccountCreateTime"),
+    battle_royale: { max_rank: pick(d, "br_max_rank", "BrMaxRank"), points: pick(d, "br_rank_point", "BrRankPoint") },
+    clash_squad: { max_rank: pick(d, "cs_max_rank", "CsMaxRank"), points: pick(d, "cs_rank_point", "CsRankPoint") },
+    guild: {
+      id: pick(guild, "id", "GuildID"), name: pick(guild, "name", "GuildName"),
+      level: pick(guild, "level", "GuildLevel"), member_count: pick(guild, "member_count", "GuildMember"),
+      capacity: pick(guild, "capacity", "GuildCapacity"),
+    },
     fetched_at: new Date().toISOString(),
   };
 }
@@ -132,56 +146,31 @@ app.get("/", (req, res) => {
 <p>Free Fire name check API is live.</p>
 <pre style="background:#111826;padding:12px;border-radius:8px;overflow:auto">GET /api/player?uid=PLAYER_UID&amp;region=BD
 GET /api/name?uid=PLAYER_UID
-GET /api/stats?uid=PLAYER_UID
-GET /api/ban?uid=PLAYER_UID
-GET /api/wishlist?uid=PLAYER_UID
 GET /health</pre></body>`);
 });
 
-app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime(), upstream_configured: !!FF_API_KEY }));
+app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
 
-function parseQuery(req) {
+async function handle(req, res, onlyName) {
   const uid = String(req.query.uid || "").trim();
   const region = String(req.query.region || DEFAULT_REGION).trim().toUpperCase();
-  if (!/^\d{9,10}$/.test(uid)) throw httpError(400, "Invalid uid. Use 9-10 digits only.");
-  return { uid, region };
+  if (!/^\d{5,15}$/.test(uid)) {
+    return res.status(400).json({ success: false, error: "Invalid uid. Use digits only (5-15 digits)." });
+  }
+  try {
+    const key = `${region}:${uid}`;
+    let data = cacheGet(key);
+    const cached = !!data;
+    if (!data) { data = await fetchPlayer(uid, region); cacheSet(key, data); }
+    if (onlyName) return res.json({ success: true, uid: data.uid, name: data.name, region: data.region, cached });
+    res.json({ ...data, cached });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, error: err.message || "Internal error" });
+  }
 }
 
-// cache + error wrapper
-function route(endpoint, build) {
-  return async (req, res) => {
-    try {
-      const { uid, region } = parseQuery(req);
-      const key = `${endpoint}:${region}:${uid}`;
-      let out = cacheGet(key);
-      const cached = !!out;
-      if (!out) {
-        const { data, usedRegion } = endpoint === "bancheck"
-          ? { data: await callUpstream("bancheck", { uid, lang: String(req.query.lang || "en") }), usedRegion: null }
-          : await callWithRegion(endpoint, uid, region);
-        out = build(data, uid, usedRegion);
-        cacheSet(key, out);
-      }
-      res.json({ ...out, cached });
-    } catch (err) {
-      res.status(err.status || 500).json({ success: false, error: err.message || "Internal error" });
-    }
-  };
-}
-
-const playerRoute = route("info", normalizePlayer);
-app.get("/api/player", auth, playerRoute);
-app.get("/api/name", auth, async (req, res) => {
-  // শুধু নাম ফেরত দেয়, একই cache ব্যবহার করে
-  const send = res.json.bind(res);
-  res.json = (body) => send(body && body.success
-    ? { success: true, uid: body.uid, name: body.name, region: body.region, cached: body.cached }
-    : body);
-  return playerRoute(req, res);
-});
-app.get("/api/stats", auth, route("stats", (d, uid, r) => ({ success: true, uid, region: r, stats: d })));
-app.get("/api/wishlist", auth, route("wishlist", (d, uid, r) => ({ success: true, uid, region: r, wishlist: d.wishlist || [] })));
-app.get("/api/ban", auth, route("bancheck", (d, uid) => ({ success: true, uid, ban: d })));
+app.get("/api/player", auth, (req, res) => handle(req, res, false));
+app.get("/api/name", auth, (req, res) => handle(req, res, true));
 
 app.use((req, res) => res.status(404).json({ success: false, error: "Not found." }));
 

@@ -1,36 +1,31 @@
 # FF Name Check API
 
 Free Fire UID → player name/info API. Node.js + Express, Render free tier ready.
-Upstream: Free Fire Community API (developers.freefirecommunity.com).
 
 ## Endpoints
-- `GET /api/name?uid=8674177274` — name only
 - `GET /api/player?uid=8674177274&region=BD` — full info
-- `GET /api/stats?uid=...` — career stats
-- `GET /api/ban?uid=...&lang=en` — ban check
-- `GET /api/wishlist?uid=...`
-- `GET /health` — uptime monitor
-
-Region `BD` is mapped to upstream `sg`. If the player is not found there, `ind` and `br` are tried automatically.
+- `GET /api/name?uid=8674177274` — name only
+- `GET /health` — for uptime monitors
 
 ## Environment variables
 | Name | Purpose |
 |---|---|
-| `FF_API_KEY` | **Required.** Key from developers.freefirecommunity.com |
-| `API_KEYS` | Optional comma-separated keys for your own clients (`x-api-key` header or `?key=`) |
+| `UPSTREAM_URL` | Your data source URL, with `{uid}` and `{region}` placeholders (required) |
+| `UPSTREAM_KEY` | Optional key for the upstream |
+| `UPSTREAM_KEY_HEADER` | Header name for that key (default `Authorization` as Bearer; use `x-api-key` if needed) |
+| `API_KEYS` | Optional comma-separated keys; if set, clients send `x-api-key` header or `?key=` |
 | `DEFAULT_REGION` | Default `BD` |
-| `CACHE_TTL_SECONDS` | Default 1800 (upstream free tier is only 100 req/hour, so keep cache long) |
+| `CACHE_TTL_SECONDS` | Default 300 |
 | `RATE_LIMIT_PER_MIN` | Default 60 per IP |
-| `FF_API_BASE` | Optional, default `https://developers.freefirecommunity.com/api/v1` |
 
 ## Deploy on Render (free)
-1. Push these files to GitHub.
-2. Render → New → Web Service → connect repo (reads `render.yaml`), plan Free.
-3. Set `FF_API_KEY` (and `API_KEYS`), deploy.
-4. Free plan sleeps after ~15 min: ping `/health` every 5 min with UptimeRobot.
+1. Push these files to a GitHub repo.
+2. Render → New → Web Service → connect repo (it reads `render.yaml`), plan **Free**.
+3. Add the env variables above, deploy.
+4. Free plan sleeps after ~15 min idle: add https://uptimerobot.com to ping `/health` every 5 min.
 
 ## Local run
 ```
 npm install
-FF_API_KEY=your_key npm start
+UPSTREAM_URL="https://freefireinfo-zy9l.onrender.com/api/v1/player-profile?uid={uid}&server={region}" npm start
 ```
